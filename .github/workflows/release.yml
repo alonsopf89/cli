@@ -5,9 +5,7 @@
 
 name: Release
 permissions:
-  contents: write
-  attestations: write
-  id-token: write
+  contents: read
 
 on:
   pull_request:
@@ -39,6 +37,10 @@ jobs:
 
   build:
     needs: plan
+    permissions:
+      contents: read
+      attestations: write
+      id-token: write
     strategy:
       fail-fast: false
       matrix:
@@ -69,9 +71,9 @@ jobs:
             archive: zip
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           targets: ${{ matrix.target }}
 
@@ -80,20 +82,25 @@ jobs:
         run: cargo install cross --git https://github.com/cross-rs/cross --tag v0.2.5
 
       - name: Build
+        env:
+          MATRIX_CROSS: ${{ matrix.cross }}
+          MATRIX_TARGET: ${{ matrix.target }}
         run: |
-          if [ "${{ matrix.cross }}" = "true" ]; then
-            cross build --release --target ${{ matrix.target }} --locked
+          if [ "${MATRIX_CROSS}" = "true" ]; then
+            cross build --release --target "${MATRIX_TARGET}" --locked
           else
-            cargo build --release --target ${{ matrix.target }} --locked
+            cargo build --release --target "${MATRIX_TARGET}" --locked
           fi
         shell: bash
 
       - name: Package (unix)
         if: matrix.archive == 'tar.gz'
+        env:
+          MATRIX_TARGET: ${{ matrix.target }}
         run: |
-          ARTIFACT="google-workspace-cli-${{ matrix.target }}"
+          ARTIFACT="google-workspace-cli-${MATRIX_TARGET}"
           mkdir -p staging
-          cp "target/${{ matrix.target }}/release/gws" staging/
+          cp "target/${MATRIX_TARGET}/release/gws" staging/
           cp LICENSE README.md CHANGELOG.md staging/
           tar czf "${ARTIFACT}.tar.gz" -C staging .
           shasum -a 256 "${ARTIFACT}.tar.gz" > "${ARTIFACT}.tar.gz.sha256"
@@ -101,10 +108,12 @@ jobs:
 
       - name: Package (windows)
         if: matrix.archive == 'zip'
+        env:
+          MATRIX_TARGET: ${{ matrix.target }}
         run: |
-          $ARTIFACT = "google-workspace-cli-${{ matrix.target }}"
+          $ARTIFACT = "google-workspace-cli-$env:MATRIX_TARGET"
           New-Item -ItemType Directory -Path $ARTIFACT
-          Copy-Item "target/${{ matrix.target }}/release/gws.exe" "$ARTIFACT/"
+          Copy-Item "target/$env:MATRIX_TARGET/release/gws.exe" "$ARTIFACT/"
           Copy-Item LICENSE, README.md, CHANGELOG.md "$ARTIFACT/"
           Compress-Archive -Path "$ARTIFACT/*" -DestinationPath "$ARTIFACT.zip"
           (Get-FileHash "$ARTIFACT.zip" -Algorithm SHA256).Hash.ToLower() + "  $ARTIFACT.zip" | Out-File -Encoding ascii "$ARTIFACT.zip.sha256"
@@ -112,7 +121,7 @@ jobs:
 
       - name: Attest
         if: github.ref_type == 'tag'
-        uses: actions/attest-build-provenance@43d14bc2b83dec42d39ecae14e916627a18bb661 # v3
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
         with:
           subject-path: google-workspace-cli-${{ matrix.target }}.${{ matrix.archive }}
 
@@ -127,8 +136,10 @@ jobs:
     needs: [plan, build]
     if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
@@ -139,9 +150,12 @@ jobs:
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PRERELEASE: ${{ needs.plan.outputs.prerelease }}
+          REF_NAME: ${{ github.ref_name }}
+          TARGET_SHA: ${{ github.sha }}
         run: |
           PRERELEASE_FLAG=""
-          if [ "${{ needs.plan.outputs.prerelease }}" = "true" ]; then
+          if [ "${PRERELEASE}" = "true" ]; then
             PRERELEASE_FLAG="--prerelease"
           fi
           
@@ -155,8 +169,8 @@ jobs:
           
           \`\`\`bash
           # 1. Download the archive and its checksum
-          curl -sLO https://github.com/googleworkspace/cli/releases/download/${{ github.ref_name }}/google-workspace-cli-<target>.tar.gz
-          curl -sLO https://github.com/googleworkspace/cli/releases/download/${{ github.ref_name }}/google-workspace-cli-<target>.tar.gz.sha256
+          curl -sLO https://github.com/googleworkspace/cli/releases/download/${REF_NAME}/google-workspace-cli-<target>.tar.gz
+          curl -sLO https://github.com/googleworkspace/cli/releases/download/${REF_NAME}/google-workspace-cli-<target>.tar.gz.sha256
           
           # 2. Verify the checksum
           shasum -a 256 -c google-workspace-cli-<target>.tar.gz.sha256
@@ -176,22 +190,19 @@ jobs:
           ---
           "
 
-          gh release create "${{ github.ref_name }}" \
-            --target "${{ github.sha }}" \
-            --title "${{ github.ref_name }}" \
-            --notes "$NOTES" \
-            --generate-notes \
-            $PRERELEASE_FLAG \
-            artifacts/*
+          gh release create "${REF_NAME}"             --target "${TARGET_SHA}"             --title "${REF_NAME}"             --notes "$NOTES"             --generate-notes             $PRERELEASE_FLAG             artifacts/*
 
   publish-npm:
     needs: [plan, release]
     runs-on: ubuntu-latest
     if: ${{ needs.plan.outputs.publishing == 'true' && needs.plan.outputs.prerelease == 'false' }}
+    permissions:
+      contents: read
+      id-token: write
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: '20.x'
 
@@ -230,10 +241,12 @@ jobs:
     needs: [plan, release]
     runs-on: ubuntu-latest
     if: ${{ needs.plan.outputs.publishing == 'true' && needs.plan.outputs.prerelease == 'false' }}
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
 
       # Publish library crate first (CLI depends on it)
       - name: Publish google-workspace
